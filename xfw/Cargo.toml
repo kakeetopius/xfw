@@ -22,7 +22,8 @@ tokio = { workspace = true, features = [
     "signal",
 ] }
 clap = { workspace = true, features = ["derive", "color", "help", "suggestions", "usage"] }
-netdev = "0.46.2"
+netdev = { workspace = true }
+ipnet = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

@@ -6,6 +6,10 @@ use clap::{Args, Parser, Subcommand};
 pub struct Xfw {
     #[command(subcommand)]
     pub command: Commands,
+
+    /// Directory where to pin the maps containing the blocked IPs or where the maps are pinned.
+    #[arg(long, short, default_value = "/sys/fs/bpf", global = true)]
+    pub maps_dir: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -13,9 +17,9 @@ pub enum Commands {
     /// Start the xfw IP blocker.
     Start(StartArgs),
     /// Block an IP or IP range.
-    Block,
+    Block(BlockArgs),
     /// Unblock an IP or IP range.
-    Unblock,
+    Unblock(UnBlockArgs),
     /// List blocked IPs and IP ranges.
     List,
 }
@@ -25,4 +29,18 @@ pub struct StartArgs {
     /// The network interface(s) to block ips from.
     #[arg(long, short, required = true, num_args=1..)]
     pub ifaces: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct BlockArgs {
+    /// IP(s) or IP range(s) to block. Ranges should be in CIDR notation eg 10.2.2.0/24
+    #[arg(required = true, num_args=1..)]
+    pub ips: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct UnBlockArgs {
+    /// IP(s) or IP range(s) to unblock. Ranges should be in CIDR notation eg 10.2.2.0/24
+    #[arg(required = true, num_args=1..)]
+    pub ips: Vec<String>,
 }
