@@ -21,7 +21,9 @@ tokio = { workspace = true, features = [
     "net",
     "signal",
 ] }
-clap = { workspace = true, features = ["derive"] }
+clap = { workspace = true, features = ["derive", "color", "help", "suggestions", "usage"] }
+netdev = "0.46.2"
+
 [build-dependencies]
 anyhow = { workspace = true }
 aya-build = { workspace = true }

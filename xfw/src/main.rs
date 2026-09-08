@@ -1,22 +1,26 @@
-use anyhow::Context as _;
-use aya::programs::{Xdp, XdpMode};
 use clap::Parser;
 #[rustfmt::skip]
 use log::{debug, warn};
-use tokio::signal;
-
-#[derive(Debug, Parser)]
-struct Opt {
-    #[clap(short, long, default_value = "eth0")]
-    iface: String,
-}
+use xfw::{commands::run_command, util::argparser};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
+    let opts = argparser::Xfw::parse();
 
     env_logger::init();
 
+    set_rlimit();
+
+    let mut ebpf = init_ebpf()?;
+
+    run_logger(&mut ebpf)?;
+
+    run_command(opts, &mut ebpf).await?;
+
+    Ok(())
+}
+
+fn set_rlimit() {
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
     let rlim = libc::rlimit {
@@ -27,23 +31,28 @@ async fn main() -> anyhow::Result<()> {
     if ret != 0 {
         debug!("remove limit on locked memory failed, ret is: {ret}");
     }
+}
 
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
-    let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
+fn init_ebpf() -> Result<aya::Ebpf, aya::EbpfError> {
+    // This will include the eBPF object file as raw bytes at compile-time and load it at
+    // runtime.
+    aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/xfw"
-    )))?;
-    match aya_log::EbpfLogger::init(&mut ebpf) {
+    )))
+}
+
+fn run_logger(ebpf: &mut aya::Ebpf) -> anyhow::Result<()> {
+    match aya_log::EbpfLogger::init(ebpf) {
         Err(e) => {
             // This can happen if you remove all log statements from your eBPF program.
             warn!("failed to initialize eBPF logger: {e}");
+            Ok(())
         }
         Ok(logger) => {
             let mut logger =
                 tokio::io::unix::AsyncFd::with_interest(logger, tokio::io::Interest::READABLE)?;
+
             tokio::task::spawn(async move {
                 loop {
                     let mut guard = logger.readable_mut().await.unwrap();
@@ -51,18 +60,8 @@ async fn main() -> anyhow::Result<()> {
                     guard.clear_ready();
                 }
             });
+
+            Ok(())
         }
     }
-    let Opt { iface } = opt;
-    let program: &mut Xdp = ebpf.program_mut("xfw").unwrap().try_into()?;
-    program.load()?;
-    program.attach(&iface, XdpMode::default())
-        .context("failed to attach the XDP program with default mode - try changing XdpMode::default() to XdpMode::Skb")?;
-
-    let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
-    ctrl_c.await?;
-    println!("Exiting...");
-
-    Ok(())
 }
