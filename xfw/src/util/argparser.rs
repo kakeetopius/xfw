@@ -21,12 +21,12 @@ pub enum Commands {
     /// Unblock an IP or IP range.
     Unblock(UnBlockArgs),
     /// List blocked IPs and IP ranges.
-    List,
+    List(ListArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct StartArgs {
-    /// The network interface(s) to block ips from.
+    /// The network interface(s) to block ips from. To block on all interfaces use '--ifaces all'
     #[arg(long, short, required = true, num_args=1..)]
     pub ifaces: Vec<String>,
 }
@@ -43,4 +43,15 @@ pub struct UnBlockArgs {
     /// IP(s) or IP range(s) to unblock. Ranges should be in CIDR notation eg 10.2.2.0/24
     #[arg(required = true, num_args=1..)]
     pub ips: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ListArgs {
+    /// List only blocked IPv4 addresses.
+    #[arg(short = '4', long)]
+    pub ip4: bool,
+
+    /// List only blocked IPv6 addresses.
+    #[arg(short = '6', long)]
+    pub ip6: bool,
 }
