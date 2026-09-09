@@ -1,4 +1,5 @@
 use std::{
+    io,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
     str::FromStr,
@@ -8,7 +9,7 @@ use anyhow::{Context, anyhow};
 use aya::{
     Ebpf,
     maps::{
-        Map, MapData,
+        Map, MapData, MapError,
         lpm_trie::{Key, LpmTrie},
     },
     programs::{Xdp, XdpMode},
@@ -16,11 +17,11 @@ use aya::{
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use tokio::signal;
 use xfw_common::{
-    types::{IPv4Addr, IPv4Key, IPv6Addr, IPv6Key},
+    types::{IPKey, IPv4Addr, IPv4Key, IPv6Addr, IPv6Key},
     vars::{BLOCKED_IPV4_MAP_FILE, BLOCKED_IPV6_MAP_FILE, PROG_NAME},
 };
 
-use crate::util::argparser::{BlockArgs, Commands, ListArgs, StartArgs, Xfw};
+use crate::util::argparser::{BlockArgs, Commands, ListArgs, StartArgs, UnBlockArgs, Xfw};
 
 pub async fn run_command(opts: Xfw, ebpf: &mut Ebpf, map_dir: &Path) -> anyhow::Result<()> {
     match opts.command {
@@ -29,8 +30,8 @@ pub async fn run_command(opts: Xfw, ebpf: &mut Ebpf, map_dir: &Path) -> anyhow::
             Ok(())
         }
         Commands::Block(args) => run_block_ips(args, map_dir),
+        Commands::Unblock(args) => run_unblock(args, map_dir),
         Commands::List(args) => run_list(args, map_dir),
-        _ => Ok(()),
     }
 }
 
@@ -65,7 +66,7 @@ async fn run_start(opts: StartArgs, ebpf: &mut Ebpf) -> anyhow::Result<()> {
     }
 
     let ctrl_c = signal::ctrl_c();
-    println!("Waiting for Ctrl-C...");
+    println!("xfw started, use Ctrl-C to stop.");
     ctrl_c.await?;
     println!("Exiting...");
 
@@ -73,42 +74,7 @@ async fn run_start(opts: StartArgs, ebpf: &mut Ebpf) -> anyhow::Result<()> {
 }
 
 fn run_block_ips(opts: BlockArgs, map_dir: &Path) -> anyhow::Result<()> {
-    let mut ip4addrs: Vec<IPv4Key> = Vec::new();
-    let mut ip6addrs: Vec<IPv6Key> = Vec::new();
-
-    for ip in opts.ips {
-        if ip.contains("/") {
-            match IpNet::from_str(&ip)? {
-                IpNet::V4(ip4net) => {
-                    ip4addrs.push(IPv4Key {
-                        prefix: ip4net.prefix_len() as u32,
-                        addr: ip4net.addr().as_octets().to_owned(),
-                    });
-                }
-                IpNet::V6(ip6net) => {
-                    ip6addrs.push(IPv6Key {
-                        prefix: ip6net.prefix_len() as u32,
-                        addr: ip6net.addr().as_octets().to_owned(),
-                    });
-                }
-            }
-        } else {
-            match IpAddr::from_str(&ip)? {
-                IpAddr::V4(ip4addr) => {
-                    ip4addrs.push(IPv4Key {
-                        prefix: 32,
-                        addr: ip4addr.as_octets().to_owned(),
-                    });
-                }
-                IpAddr::V6(ip6addr) => {
-                    ip6addrs.push(IPv6Key {
-                        prefix: 128,
-                        addr: ip6addr.as_octets().to_owned(),
-                    });
-                }
-            }
-        }
-    }
+    let (ip4addrs, ip6addrs) = get_ip_keys_from_strings(opts.ips)?;
 
     insert_into_ip4_blocked_list(ip4addrs, map_dir)?;
     insert_into_ip6_blocked_list(ip6addrs, map_dir)?;
@@ -116,14 +82,39 @@ fn run_block_ips(opts: BlockArgs, map_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn run_unblock(opts: UnBlockArgs, map_dir: &Path) -> anyhow::Result<()> {
+    let (mut ip4addrs, mut ip6addrs) = get_ip_keys_from_strings(opts.ips)?;
+
+    if opts.unblock_all {
+        ip4addrs.extend(get_all_blocked_ip4(map_dir)?);
+        ip6addrs.extend(get_all_blocked_ip6(map_dir)?);
+    }
+
+    let mut successfully_unblocked = delete_from_ip4_blocked_list(ip4addrs, map_dir)?;
+    successfully_unblocked.extend(delete_from_ip6_blocked_list(ip6addrs, map_dir)?);
+
+    if !successfully_unblocked.is_empty() {
+        println!("\nUnblocked: ");
+
+        let ip_strings: Vec<String> = successfully_unblocked
+            .into_iter()
+            .map(|ip| ip_key_to_string(ip).unwrap_or("".to_string()))
+            .collect();
+
+        println!("{}", ip_strings.join(", "))
+    }
+
+    Ok(())
+}
+
 fn run_list(opts: ListArgs, map_dir: &Path) -> anyhow::Result<()> {
     let blocked_ips = if opts.ip4 {
-        get_blocked_ip4(map_dir)?
+        get_all_blocked_ip4_as_ipnets(map_dir)?
     } else if opts.ip6 {
-        get_blocked_ip6(map_dir)?
+        get_all_blocked_ip6_as_ipnets(map_dir)?
     } else {
-        let mut ips = get_blocked_ip4(map_dir)?;
-        ips.extend(get_blocked_ip6(map_dir)?);
+        let mut ips = get_all_blocked_ip4_as_ipnets(map_dir)?;
+        ips.extend(get_all_blocked_ip6_as_ipnets(map_dir)?);
         ips
     };
 
@@ -167,7 +158,104 @@ fn insert_into_ip6_blocked_list(ips: Vec<IPv6Key>, map_dir: &Path) -> anyhow::Re
     Ok(())
 }
 
-fn get_blocked_ip4(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
+fn delete_from_ip4_blocked_list(ips: Vec<IPv4Key>, map_dir: &Path) -> anyhow::Result<Vec<IPKey>> {
+    let mut successful: Vec<IPKey> = Vec::new();
+    if ips.is_empty() {
+        return Ok(successful);
+    }
+
+    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
+    let mut ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
+
+    for ip in ips {
+        match ip4map.remove(&Key::new(ip.prefix, ip.addr)) {
+            Ok(_) => successful.push(IPKey::V4(ip)),
+
+            Err(map_error) => {
+                if let MapError::SyscallError(e) = &map_error
+                    && e.io_error.kind() == io::ErrorKind::NotFound
+                {
+                    continue; // ignore ips that are not found in the blocked list.
+                } else {
+                    return Err(map_error.into());
+                }
+            }
+        }
+    }
+
+    Ok(successful)
+}
+
+fn delete_from_ip6_blocked_list(ips: Vec<IPv6Key>, map_dir: &Path) -> anyhow::Result<Vec<IPKey>> {
+    let mut successful: Vec<IPKey> = Vec::new();
+    if ips.is_empty() {
+        return Ok(successful);
+    }
+
+    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
+    let mut ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
+
+    for ip in ips {
+        match ip6map.remove(&Key::new(ip.prefix, ip.addr)) {
+            Ok(_) => successful.push(IPKey::V6(ip)),
+            Err(map_error) => {
+                if let MapError::SyscallError(e) = &map_error
+                    && e.io_error.kind() == io::ErrorKind::NotFound
+                {
+                    continue; // ignore ips that are not found in the blocked list.
+                } else {
+                    return Err(map_error.into());
+                }
+            }
+        }
+    }
+
+    Ok(successful)
+}
+
+fn get_all_blocked_ip4(map_dir: &Path) -> anyhow::Result<Vec<IPv4Key>> {
+    let mut ips: Vec<IPv4Key> = Vec::new();
+
+    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
+    let ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
+
+    for ip4 in ip4map.iter() {
+        let ip4_key = match ip4 {
+            Ok((addr_bytes, _)) => IPv4Key {
+                addr: addr_bytes.data(),
+                prefix: addr_bytes.prefix_len(),
+            },
+            _ => continue,
+        };
+
+        ips.push(ip4_key);
+    }
+
+    Ok(ips)
+}
+
+fn get_all_blocked_ip6(map_dir: &Path) -> anyhow::Result<Vec<IPv6Key>> {
+    let mut ips: Vec<IPv6Key> = Vec::new();
+
+    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
+    let ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
+
+    for ip6 in ip6map.iter() {
+        let ip6_key = match ip6 {
+            Ok((addr_bytes, _)) => IPv6Key {
+                addr: addr_bytes.data(),
+                prefix: addr_bytes.prefix_len(),
+            },
+            _ => continue,
+        };
+
+        ips.push(ip6_key);
+    }
+
+    Ok(ips)
+}
+
+fn get_all_blocked_ip4_as_ipnets(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
     let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
     let ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
 
@@ -188,7 +276,7 @@ fn get_blocked_ip4(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
     Ok(ips)
 }
 
-fn get_blocked_ip6(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
+fn get_all_blocked_ip6_as_ipnets(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
     let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
     let ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
 
@@ -207,4 +295,60 @@ fn get_blocked_ip6(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
     }
 
     Ok(ips)
+}
+
+fn get_ip_keys_from_strings(ips: Vec<String>) -> anyhow::Result<(Vec<IPv4Key>, Vec<IPv6Key>)> {
+    let mut ip4addrs: Vec<IPv4Key> = Vec::new();
+    let mut ip6addrs: Vec<IPv6Key> = Vec::new();
+
+    for ip in ips {
+        if ip.contains("/") {
+            match IpNet::from_str(&ip)? {
+                IpNet::V4(ip4net) => {
+                    ip4addrs.push(IPv4Key {
+                        prefix: ip4net.prefix_len() as u32,
+                        addr: ip4net.addr().as_octets().to_owned(),
+                    });
+                }
+                IpNet::V6(ip6net) => {
+                    ip6addrs.push(IPv6Key {
+                        prefix: ip6net.prefix_len() as u32,
+                        addr: ip6net.addr().as_octets().to_owned(),
+                    });
+                }
+            }
+        } else {
+            match IpAddr::from_str(&ip)? {
+                IpAddr::V4(ip4addr) => {
+                    ip4addrs.push(IPv4Key {
+                        prefix: 32,
+                        addr: ip4addr.as_octets().to_owned(),
+                    });
+                }
+                IpAddr::V6(ip6addr) => {
+                    ip6addrs.push(IPv6Key {
+                        prefix: 128,
+                        addr: ip6addr.as_octets().to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok((ip4addrs, ip6addrs))
+}
+
+fn ip_key_to_string(ip_key: IPKey) -> anyhow::Result<String> {
+    let ip = match ip_key {
+        IPKey::V4(v4) => {
+            let ip = Ipv4Net::new(Ipv4Addr::from_octets(v4.addr), v4.prefix as u8)?;
+            IpNet::V4(ip)
+        }
+        IPKey::V6(v6) => {
+            let ip = Ipv6Net::new(Ipv6Addr::from_octets(v6.addr), v6.prefix as u8)?;
+            IpNet::V6(ip)
+        }
+    };
+
+    Ok(ip.to_string())
 }

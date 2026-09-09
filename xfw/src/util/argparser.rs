@@ -41,8 +41,11 @@ pub struct BlockArgs {
 #[derive(Args, Debug)]
 pub struct UnBlockArgs {
     /// IP(s) or IP range(s) to unblock. Ranges should be in CIDR notation eg 10.2.2.0/24
-    #[arg(required = true, num_args=1..)]
     pub ips: Vec<String>,
+
+    /// Unblock all blocked IPs.
+    #[arg(short = 'a', long = "all")]
+    pub unblock_all: bool,
 }
 
 #[derive(Args, Debug)]
