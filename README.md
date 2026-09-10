@@ -47,7 +47,7 @@ sudo xfw start --ifaces all
 sudo xfw block 203.0.113.42
 sudo xfw block 10.2.2.0/24
 sudo xfw block 203.0.113.42 198.51.100.0/24
-sudo xfw block -f to_block.txt // block ips listed in a file, one per line.
+sudo xfw block -f to_block.txt # block ips listed in a file, one per line.
 ```
 
 ### Unblock an IP or range
@@ -63,6 +63,15 @@ sudo xfw unblock --all
 sudo xfw list          # all blocked IPs
 sudo xfw list -4       # IPv4 only
 sudo xfw list -6       # IPv6 only
+```
+
+### Export blocked IPs
+
+```sh
+sudo xfw export                                        # print each ip one per line
+sudo xfw export -f json                                # print as JSON
+sudo xfw export -f list                                # print as comma-separated list
+sudo xfw export -f json -o blocklist.json              # write to a file
 ```
 
 ### Custom maps directory

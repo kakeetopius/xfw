@@ -23,7 +23,9 @@ tokio = { workspace = true, features = [
 ] }
 clap = { workspace = true, features = ["derive", "color", "help", "suggestions", "usage"] }
 netdev = { workspace = true }
-ipnet = { workspace = true }
+ipnet = { workspace = true,  features = ["serde"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

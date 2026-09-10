@@ -1,6 +1,6 @@
 use std::{
-    fs::File,
-    io::{self, Read},
+    fs::{self, File},
+    io::{self, Read, Write},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
     str::FromStr,
@@ -22,7 +22,9 @@ use xfw_common::{
     vars::{BLOCKED_IPV4_MAP_FILE, BLOCKED_IPV6_MAP_FILE, PROG_NAME},
 };
 
-use crate::util::argparser::{BlockArgs, Commands, ListArgs, StartArgs, UnBlockArgs, Xfw};
+use crate::util::argparser::{
+    BlockArgs, Commands, ExportArgs, ExportFormats, ListArgs, StartArgs, UnBlockArgs, Xfw,
+};
 
 pub async fn run_command(opts: Xfw, ebpf: &mut Ebpf, map_dir: &Path) -> anyhow::Result<()> {
     match opts.command {
@@ -33,6 +35,7 @@ pub async fn run_command(opts: Xfw, ebpf: &mut Ebpf, map_dir: &Path) -> anyhow::
         Commands::Block(args) => run_block_ips(args, map_dir),
         Commands::Unblock(args) => run_unblock(args, map_dir),
         Commands::List(args) => run_list(args, map_dir),
+        Commands::Export(args) => run_export(args, map_dir),
     }
 }
 
@@ -144,6 +147,29 @@ fn run_list(opts: ListArgs, map_dir: &Path) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn run_export(opts: ExportArgs, map_dir: &Path) -> anyhow::Result<()> {
+    let mut ips = get_all_blocked_ip4_as_ipnets(map_dir)?;
+    let ip6s = get_all_blocked_ip6_as_ipnets(map_dir)?;
+    ips.extend(ip6s);
+
+    let mut out: Box<dyn Write> = if let Some(file) = opts.output_file {
+        let f = fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(file)?;
+        Box::new(f)
+    } else {
+        Box::new(io::stdout())
+    };
+
+    match opts.format {
+        ExportFormats::Txt => export_txt(ips, &mut *out),
+        ExportFormats::Json => export_json(ips, &mut *out),
+        ExportFormats::List => export_list(ips, &mut *out),
+    }
 }
 
 fn insert_into_ip4_blocked_list(ips: Vec<IPv4Key>, map_dir: &Path) -> anyhow::Result<()> {
@@ -376,4 +402,45 @@ fn ip_key_to_string(ip_key: IPKey) -> anyhow::Result<String> {
     };
 
     Ok(ip.to_string())
+}
+
+fn export_txt<W>(ips: Vec<IpNet>, out: &mut W) -> anyhow::Result<()>
+where
+    W: Write + ?Sized,
+{
+    let ips_strings: Vec<String> = ips
+        // rustfmt: pliz chill
+        .iter()
+        .map(|i| i.to_string())
+        .collect();
+
+    let ips_string = ips_strings.join("\n");
+
+    std::io::copy(&mut ips_string.as_bytes(), out)?;
+
+    Ok(())
+}
+
+fn export_json<W>(ips: Vec<IpNet>, out: &mut W) -> anyhow::Result<()>
+where
+    W: Write + ?Sized,
+{
+    serde_json::to_writer_pretty(out, &ips)?;
+
+    Ok(())
+}
+
+fn export_list<W>(ips: Vec<IpNet>, out: &mut W) -> anyhow::Result<()>
+where
+    W: Write + ?Sized,
+{
+    let ip_list: Vec<String> = ips
+        // rustfmt: pliz chill
+        .iter()
+        .map(|ip| ip.to_string())
+        .collect();
+
+    std::io::copy(&mut ip_list.join(", ").as_bytes(), out)?;
+
+    Ok(())
 }

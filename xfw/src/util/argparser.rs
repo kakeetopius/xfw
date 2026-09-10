@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// A fast IP blocker.
 #[derive(Parser, Debug)]
@@ -22,6 +22,8 @@ pub enum Commands {
     Unblock(UnBlockArgs),
     /// List blocked IPs and IP ranges.
     List(ListArgs),
+    /// Export blocked IPs and IP ranges.
+    Export(ExportArgs),
 }
 
 #[derive(Args, Debug)]
@@ -38,7 +40,7 @@ pub struct BlockArgs {
     pub ips: Vec<String>,
 
     /// Read IP(s) or IP range(s) to block from a file, one per line.
-    #[arg(short, long)]
+    #[arg(short, long, value_name = "PATH")]
     pub file: Option<String>,
 }
 
@@ -61,4 +63,25 @@ pub struct ListArgs {
     /// List only blocked IPv6 addresses.
     #[arg(short = '6', long)]
     pub ip6: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ExportArgs {
+    /// Format to export the blocked IPs as.
+    #[arg(value_enum, short, long, default_value = "txt")]
+    pub format: ExportFormats,
+
+    /// File to write the exported IPs to. If omitted, output is printed to stdout.
+    #[arg(short, long, value_name = "PATH")]
+    pub output_file: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, ValueEnum)]
+pub enum ExportFormats {
+    /// Plain text, one IP or CIDR range per line.
+    Txt,
+    /// Comma-separated IPs and CIDR ranges on a single line.
+    List,
+    /// JSON array of IP/CIDR strings.
+    Json,
 }
