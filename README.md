@@ -35,7 +35,7 @@ The binary will be installed in the directory `~/.cargo/bin/`. `xfw` needs to ru
 
 Attach the XDP program to one or more interfaces:
 
-```shell
+```sh
 sudo xfw start --ifaces eth0
 sudo xfw start -i eth0 -i eth1
 sudo xfw start --ifaces all
@@ -43,22 +43,23 @@ sudo xfw start --ifaces all
 
 ### Block an IP or range
 
-```shell
+```sh
 sudo xfw block 203.0.113.42
 sudo xfw block 10.2.2.0/24
 sudo xfw block 203.0.113.42 198.51.100.0/24
+sudo xfw block -f to_block.txt // block ips listed in a file, one per line.
 ```
 
 ### Unblock an IP or range
 
-```shell
+```sh
 sudo xfw unblock 203.0.113.42
 sudo xfw unblock --all
 ```
 
 ### List blocked entries
 
-```shell
+```sh
 sudo xfw list          # all blocked IPs
 sudo xfw list -4       # IPv4 only
 sudo xfw list -6       # IPv6 only
@@ -68,7 +69,7 @@ sudo xfw list -6       # IPv6 only
 
 By default, `xfw` pins its eBPF maps at `/sys/fs/bpf`. Override this globally with `-m`/`--maps-dir`:
 
-```shell
+```sh
 sudo xfw --maps-dir /sys/fs/bpf/xfw start --ifaces eth0
 ```
 

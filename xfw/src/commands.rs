@@ -1,5 +1,6 @@
 use std::{
-    io,
+    fs::File,
+    io::{self, Read},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     path::Path,
     str::FromStr,
@@ -74,7 +75,26 @@ async fn run_start(opts: StartArgs, ebpf: &mut Ebpf) -> anyhow::Result<()> {
 }
 
 fn run_block_ips(opts: BlockArgs, map_dir: &Path) -> anyhow::Result<()> {
-    let (ip4addrs, ip6addrs) = get_ip_keys_from_strings(opts.ips)?;
+    let (mut ip4addrs, mut ip6addrs) = get_ip_keys_from_strings(&opts.ips)?;
+
+    if let Some(file_name) = opts.file {
+        let mut ip_strings = String::new();
+
+        File::open(&file_name)
+            .context(format!("Failed to open file '{}'", file_name))?
+            .read_to_string(&mut ip_strings)?;
+
+        let file_ips: Vec<&str> = ip_strings
+            // rustfmt: keep multi line pliz!!
+            .split("\n")
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let (file_ip4s, file_ip6s) = get_ip_keys_from_strings(&file_ips)?;
+
+        ip4addrs.extend(file_ip4s);
+        ip6addrs.extend(file_ip6s);
+    }
 
     insert_into_ip4_blocked_list(ip4addrs, map_dir)?;
     insert_into_ip6_blocked_list(ip6addrs, map_dir)?;
@@ -83,7 +103,7 @@ fn run_block_ips(opts: BlockArgs, map_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn run_unblock(opts: UnBlockArgs, map_dir: &Path) -> anyhow::Result<()> {
-    let (mut ip4addrs, mut ip6addrs) = get_ip_keys_from_strings(opts.ips)?;
+    let (mut ip4addrs, mut ip6addrs) = get_ip_keys_from_strings(&opts.ips)?;
 
     if opts.unblock_all {
         ip4addrs.extend(get_all_blocked_ip4(map_dir)?);
@@ -297,40 +317,45 @@ fn get_all_blocked_ip6_as_ipnets(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
     Ok(ips)
 }
 
-fn get_ip_keys_from_strings(ips: Vec<String>) -> anyhow::Result<(Vec<IPv4Key>, Vec<IPv6Key>)> {
+fn get_ip_keys_from_strings<S>(ips: &[S]) -> anyhow::Result<(Vec<IPv4Key>, Vec<IPv6Key>)>
+where
+    S: AsRef<str> + std::fmt::Display,
+{
     let mut ip4addrs: Vec<IPv4Key> = Vec::new();
     let mut ip6addrs: Vec<IPv6Key> = Vec::new();
 
     for ip in ips {
-        if ip.contains("/") {
-            match IpNet::from_str(&ip)? {
-                IpNet::V4(ip4net) => {
+        if ip.as_ref().contains("/") {
+            match IpNet::from_str(ip.as_ref()) {
+                Ok(IpNet::V4(ip4net)) => {
                     ip4addrs.push(IPv4Key {
                         prefix: ip4net.prefix_len() as u32,
-                        addr: ip4net.addr().as_octets().to_owned(),
+                        addr: ip4net.network().as_octets().to_owned(),
                     });
                 }
-                IpNet::V6(ip6net) => {
+                Ok(IpNet::V6(ip6net)) => {
                     ip6addrs.push(IPv6Key {
                         prefix: ip6net.prefix_len() as u32,
-                        addr: ip6net.addr().as_octets().to_owned(),
+                        addr: ip6net.network().as_octets().to_owned(),
                     });
                 }
+                Err(_) => return Err(anyhow!(format!("Invalid IP address '{}'", ip))),
             }
         } else {
-            match IpAddr::from_str(&ip)? {
-                IpAddr::V4(ip4addr) => {
+            match IpAddr::from_str(ip.as_ref()) {
+                Ok(IpAddr::V4(ip4addr)) => {
                     ip4addrs.push(IPv4Key {
                         prefix: 32,
                         addr: ip4addr.as_octets().to_owned(),
                     });
                 }
-                IpAddr::V6(ip6addr) => {
+                Ok(IpAddr::V6(ip6addr)) => {
                     ip6addrs.push(IPv6Key {
                         prefix: 128,
                         addr: ip6addr.as_octets().to_owned(),
                     });
                 }
+                Err(_) => return Err(anyhow!(format!("Invalid IP address '{}'", ip))),
             }
         }
     }

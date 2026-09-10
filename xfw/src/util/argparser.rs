@@ -34,8 +34,12 @@ pub struct StartArgs {
 #[derive(Args, Debug)]
 pub struct BlockArgs {
     /// IP(s) or IP range(s) to block. Ranges should be in CIDR notation eg 10.2.2.0/24
-    #[arg(required = true, num_args=1..)]
+    #[arg(num_args=1..)]
     pub ips: Vec<String>,
+
+    /// Read IP(s) or IP range(s) to block from a file, one per line.
+    #[arg(short, long)]
+    pub file: Option<String>,
 }
 
 #[derive(Args, Debug)]
