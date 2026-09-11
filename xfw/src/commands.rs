@@ -9,43 +9,58 @@ use std::{
 use anyhow::{Context, anyhow};
 use aya::{
     Ebpf,
-    maps::{
-        Map, MapData, MapError,
-        lpm_trie::{Key, LpmTrie},
-    },
     programs::{Xdp, XdpMode},
 };
 use clap::CommandFactory;
+use clap_complete::Shell;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use tokio::signal;
 use xfw_common::{
-    types::{IPKey, IPv4Addr, IPv4Key, IPv6Addr, IPv6Key},
-    vars::{BLOCKED_IPV4_MAP_FILE, BLOCKED_IPV6_MAP_FILE, PROG_NAME},
+    types::{IPKey, IPv4Key, IPv6Key},
+    vars::PROG_NAME,
 };
 
-use crate::util::argparser::{
-    BlockArgs, Commands, ExportArgs, ExportFormats, ListArgs, StartArgs, UnBlockArgs, Xfw,
+use crate::{
+    ebpf,
+    util::argparser::{
+        BlockArgs, Commands, ExportArgs, ExportFormats, ListArgs, StartArgs, UnBlockArgs, XfwArgs,
+    },
 };
 
-pub async fn run_command(opts: Xfw, ebpf: &mut Ebpf, map_dir: &Path) -> anyhow::Result<()> {
+pub async fn run_command(opts: XfwArgs) -> anyhow::Result<()> {
+    if let Commands::Completions { shell } = opts.command {
+        generate_shell_completions(shell);
+        return Ok(());
+    }
+
+    ebpf::set_rlimit();
+
+    let map_dir = ebpf::get_map_dir(&opts.maps_dir)?;
+
+    let mut ebpf = ebpf::init(&map_dir)?;
+
     match opts.command {
         Commands::Start(args) => {
-            run_start(args, ebpf).await?;
+            run_start(args, &mut ebpf).await?;
             Ok(())
         }
-        Commands::Block(args) => run_block_ips(args, map_dir),
-        Commands::Unblock(args) => run_unblock(args, map_dir),
-        Commands::List(args) => run_list(args, map_dir),
-        Commands::Export(args) => run_export(args, map_dir),
-        Commands::Completions { shell } => {
-            let mut cmd = Xfw::command();
-            clap_complete::generate(shell, &mut cmd, "xfw", &mut std::io::stdout());
-            Ok(())
-        }
+        Commands::Block(args) => run_block_ips(args, &map_dir),
+        Commands::Unblock(args) => run_unblock(args, &map_dir),
+        Commands::List(args) => run_list(args, &map_dir),
+        Commands::Export(args) => run_export(args, &map_dir),
+        _ => Ok(()),
     }
 }
 
+fn generate_shell_completions(shell: Shell) {
+    let mut cmd = XfwArgs::command();
+    clap_complete::generate(shell, &mut cmd, "xfw", &mut std::io::stdout());
+}
+
 async fn run_start(opts: StartArgs, ebpf: &mut Ebpf) -> anyhow::Result<()> {
+    env_logger::init();
+    ebpf::run_logger(ebpf)?;
+
     let program: &mut Xdp = ebpf
         .program_mut(PROG_NAME)
         .ok_or(anyhow!("could not load ebpf program: wrong program name"))?
@@ -105,8 +120,8 @@ fn run_block_ips(opts: BlockArgs, map_dir: &Path) -> anyhow::Result<()> {
         ip6addrs.extend(file_ip6s);
     }
 
-    insert_into_ip4_blocked_list(ip4addrs, map_dir)?;
-    insert_into_ip6_blocked_list(ip6addrs, map_dir)?;
+    ebpf::insert_into_ip4_blocked_list(ip4addrs, map_dir)?;
+    ebpf::insert_into_ip6_blocked_list(ip6addrs, map_dir)?;
 
     Ok(())
 }
@@ -115,12 +130,12 @@ fn run_unblock(opts: UnBlockArgs, map_dir: &Path) -> anyhow::Result<()> {
     let (mut ip4addrs, mut ip6addrs) = get_ip_keys_from_strings(&opts.ips)?;
 
     if opts.unblock_all {
-        ip4addrs.extend(get_all_blocked_ip4(map_dir)?);
-        ip6addrs.extend(get_all_blocked_ip6(map_dir)?);
+        ip4addrs.extend(ebpf::get_all_blocked_ip4(map_dir)?);
+        ip6addrs.extend(ebpf::get_all_blocked_ip6(map_dir)?);
     }
 
-    let mut successfully_unblocked = delete_from_ip4_blocked_list(ip4addrs, map_dir)?;
-    successfully_unblocked.extend(delete_from_ip6_blocked_list(ip6addrs, map_dir)?);
+    let mut successfully_unblocked = ebpf::delete_from_ip4_blocked_list(ip4addrs, map_dir)?;
+    successfully_unblocked.extend(ebpf::delete_from_ip6_blocked_list(ip6addrs, map_dir)?);
 
     if !successfully_unblocked.is_empty() {
         println!("\nUnblocked: ");
@@ -138,12 +153,12 @@ fn run_unblock(opts: UnBlockArgs, map_dir: &Path) -> anyhow::Result<()> {
 
 fn run_list(opts: ListArgs, map_dir: &Path) -> anyhow::Result<()> {
     let blocked_ips = if opts.ip4 {
-        get_all_blocked_ip4_as_ipnets(map_dir)?
+        ebpf::get_all_blocked_ip4_as_ipnets(map_dir)?
     } else if opts.ip6 {
-        get_all_blocked_ip6_as_ipnets(map_dir)?
+        ebpf::get_all_blocked_ip6_as_ipnets(map_dir)?
     } else {
-        let mut ips = get_all_blocked_ip4_as_ipnets(map_dir)?;
-        ips.extend(get_all_blocked_ip6_as_ipnets(map_dir)?);
+        let mut ips = ebpf::get_all_blocked_ip4_as_ipnets(map_dir)?;
+        ips.extend(ebpf::get_all_blocked_ip6_as_ipnets(map_dir)?);
         ips
     };
 
@@ -156,8 +171,8 @@ fn run_list(opts: ListArgs, map_dir: &Path) -> anyhow::Result<()> {
 }
 
 fn run_export(opts: ExportArgs, map_dir: &Path) -> anyhow::Result<()> {
-    let mut ips = get_all_blocked_ip4_as_ipnets(map_dir)?;
-    let ip6s = get_all_blocked_ip6_as_ipnets(map_dir)?;
+    let mut ips = ebpf::get_all_blocked_ip4_as_ipnets(map_dir)?;
+    let ip6s = ebpf::get_all_blocked_ip6_as_ipnets(map_dir)?;
     ips.extend(ip6s);
 
     let mut out: Box<dyn Write> = if let Some(file) = opts.output_file {
@@ -176,177 +191,6 @@ fn run_export(opts: ExportArgs, map_dir: &Path) -> anyhow::Result<()> {
         ExportFormats::Json => export_json(ips, &mut *out),
         ExportFormats::List => export_list(ips, &mut *out),
     }
-}
-
-fn insert_into_ip4_blocked_list(ips: Vec<IPv4Key>, map_dir: &Path) -> anyhow::Result<()> {
-    if ips.is_empty() {
-        return Ok(());
-    }
-
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
-
-    let mut ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
-
-    for ip in ips {
-        ip4map.insert(&Key::new(ip.prefix, ip.addr), 0, 0)?;
-    }
-
-    Ok(())
-}
-
-fn insert_into_ip6_blocked_list(ips: Vec<IPv6Key>, map_dir: &Path) -> anyhow::Result<()> {
-    if ips.is_empty() {
-        return Ok(());
-    }
-
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
-
-    let mut ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
-
-    for ip in ips {
-        ip6map.insert(&Key::new(ip.prefix, ip.addr), 0, 0)?;
-    }
-
-    Ok(())
-}
-
-fn delete_from_ip4_blocked_list(ips: Vec<IPv4Key>, map_dir: &Path) -> anyhow::Result<Vec<IPKey>> {
-    let mut successful: Vec<IPKey> = Vec::new();
-    if ips.is_empty() {
-        return Ok(successful);
-    }
-
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
-    let mut ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
-
-    for ip in ips {
-        match ip4map.remove(&Key::new(ip.prefix, ip.addr)) {
-            Ok(_) => successful.push(IPKey::V4(ip)),
-
-            Err(map_error) => {
-                if let MapError::SyscallError(e) = &map_error
-                    && e.io_error.kind() == io::ErrorKind::NotFound
-                {
-                    continue; // ignore ips that are not found in the blocked list.
-                } else {
-                    return Err(map_error.into());
-                }
-            }
-        }
-    }
-
-    Ok(successful)
-}
-
-fn delete_from_ip6_blocked_list(ips: Vec<IPv6Key>, map_dir: &Path) -> anyhow::Result<Vec<IPKey>> {
-    let mut successful: Vec<IPKey> = Vec::new();
-    if ips.is_empty() {
-        return Ok(successful);
-    }
-
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
-    let mut ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
-
-    for ip in ips {
-        match ip6map.remove(&Key::new(ip.prefix, ip.addr)) {
-            Ok(_) => successful.push(IPKey::V6(ip)),
-            Err(map_error) => {
-                if let MapError::SyscallError(e) = &map_error
-                    && e.io_error.kind() == io::ErrorKind::NotFound
-                {
-                    continue; // ignore ips that are not found in the blocked list.
-                } else {
-                    return Err(map_error.into());
-                }
-            }
-        }
-    }
-
-    Ok(successful)
-}
-
-fn get_all_blocked_ip4(map_dir: &Path) -> anyhow::Result<Vec<IPv4Key>> {
-    let mut ips: Vec<IPv4Key> = Vec::new();
-
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
-    let ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
-
-    for ip4 in ip4map.iter() {
-        let ip4_key = match ip4 {
-            Ok((addr_bytes, _)) => IPv4Key {
-                addr: addr_bytes.data(),
-                prefix: addr_bytes.prefix_len(),
-            },
-            _ => continue,
-        };
-
-        ips.push(ip4_key);
-    }
-
-    Ok(ips)
-}
-
-fn get_all_blocked_ip6(map_dir: &Path) -> anyhow::Result<Vec<IPv6Key>> {
-    let mut ips: Vec<IPv6Key> = Vec::new();
-
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
-    let ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
-
-    for ip6 in ip6map.iter() {
-        let ip6_key = match ip6 {
-            Ok((addr_bytes, _)) => IPv6Key {
-                addr: addr_bytes.data(),
-                prefix: addr_bytes.prefix_len(),
-            },
-            _ => continue,
-        };
-
-        ips.push(ip6_key);
-    }
-
-    Ok(ips)
-}
-
-fn get_all_blocked_ip4_as_ipnets(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV4_MAP_FILE))?)?;
-    let ip4map: LpmTrie<_, IPv4Addr, u32> = LpmTrie::try_from(map)?;
-
-    let mut ips: Vec<IpNet> = Vec::new();
-
-    for ip4 in ip4map.iter() {
-        let ip4_addr = match ip4 {
-            Ok((addr_bytes, _)) => Ipv4Net::new(
-                Ipv4Addr::from_octets(addr_bytes.data()),
-                addr_bytes.prefix_len() as u8,
-            )?,
-            _ => continue,
-        };
-
-        ips.push(IpNet::V4(ip4_addr));
-    }
-
-    Ok(ips)
-}
-
-fn get_all_blocked_ip6_as_ipnets(map_dir: &Path) -> anyhow::Result<Vec<IpNet>> {
-    let map = Map::from_map_data(MapData::from_pin(map_dir.join(BLOCKED_IPV6_MAP_FILE))?)?;
-    let ip6map: LpmTrie<_, IPv6Addr, u32> = LpmTrie::try_from(map)?;
-
-    let mut ips: Vec<IpNet> = Vec::new();
-
-    for ip6 in ip6map.iter() {
-        let ip6_addr = match ip6 {
-            Ok((addr_bytes, _)) => Ipv6Net::new(
-                Ipv6Addr::from_octets(addr_bytes.data()),
-                addr_bytes.prefix_len() as u8,
-            )?,
-            _ => continue,
-        };
-
-        ips.push(IpNet::V6(ip6_addr));
-    }
-
-    Ok(ips)
 }
 
 fn get_ip_keys_from_strings<S>(ips: &[S]) -> anyhow::Result<(Vec<IPv4Key>, Vec<IPv6Key>)>

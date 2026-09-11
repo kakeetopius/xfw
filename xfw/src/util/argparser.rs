@@ -4,7 +4,7 @@ use clap_complete::Shell;
 /// A fast IP blocker.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None, author="Kakeeto Pius")]
-pub struct Xfw {
+pub struct XfwArgs {
     #[command(subcommand)]
     pub command: Commands,
 
