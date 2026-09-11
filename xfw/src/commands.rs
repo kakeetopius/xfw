@@ -15,6 +15,7 @@ use aya::{
     },
     programs::{Xdp, XdpMode},
 };
+use clap::CommandFactory;
 use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use tokio::signal;
 use xfw_common::{
@@ -36,6 +37,11 @@ pub async fn run_command(opts: Xfw, ebpf: &mut Ebpf, map_dir: &Path) -> anyhow::
         Commands::Unblock(args) => run_unblock(args, map_dir),
         Commands::List(args) => run_list(args, map_dir),
         Commands::Export(args) => run_export(args, map_dir),
+        Commands::Completions { shell } => {
+            let mut cmd = Xfw::command();
+            clap_complete::generate(shell, &mut cmd, "xfw", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
 

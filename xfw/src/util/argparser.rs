@@ -1,4 +1,5 @@
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap_complete::Shell;
 
 /// A fast IP blocker.
 #[derive(Parser, Debug)]
@@ -24,6 +25,11 @@ pub enum Commands {
     List(ListArgs),
     /// Export blocked IPs and IP ranges.
     Export(ExportArgs),
+    /// Generate shell completions
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 #[derive(Args, Debug)]
